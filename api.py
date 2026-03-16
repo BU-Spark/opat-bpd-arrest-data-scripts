@@ -1,11 +1,20 @@
 import requests
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Dict, List, Any
-from db import upsert_records
 
-BASE_URL = "https://services.arcgis.com/sFnw0xNflSi8J0uh/arcgis/rest/services/Boston_Arrests_Tbl_Pubview/FeatureServer/0/query"
+from db import upsert_records_with_stats
+
+BASE_URL = (
+    "https://services.arcgis.com/sFnw0xNflSi8J0uh/arcgis/rest/services/"
+    "Boston_Arrests_Tbl_Pubview/FeatureServer/0/query"
+)
+
 PAGE_SIZE = 2000
 
+
+# =========================
+# Helpers
+# =========================
 
 def epoch_ms_to_iso(value):
     if value is None:
@@ -17,17 +26,22 @@ def epoch_ms_to_iso(value):
         return None
 
 
+def feature_to_record(feature: Dict[str, Any]) -> Dict[str, Any]:
+    attrs = dict(feature.get("attributes") or {})
+
+    if "ARR_DATE" in attrs:
+        attrs["ARR_DATE"] = epoch_ms_to_iso(attrs.get("ARR_DATE"))
+
+    return attrs
+
+
 def build_recent_where_clause(months_back: int = 6) -> str:
-    """
-    Build a recent-window where clause using YEAR + MONTH fields
-    instead of ARR_DATE, which avoids ArcGIS date-query syntax issues.
-    """
     if months_back <= 0:
-        raise ValueError("months_back must be greater than 0")
+        raise ValueError("months_back must be > 0")
 
     now = datetime.now(timezone.utc)
-    pairs = []
 
+    pairs = []
     year = now.year
     month = now.month
 
@@ -38,7 +52,7 @@ def build_recent_where_clause(months_back: int = 6) -> str:
             month = 12
             year -= 1
 
-    by_year: dict[int, list[int]] = {}
+    by_year = {}
     for y, m in pairs:
         by_year.setdefault(y, []).append(m)
 
@@ -49,15 +63,18 @@ def build_recent_where_clause(months_back: int = 6) -> str:
 
     return " OR ".join(clauses)
 
+
+# =========================
+# API Fetching
+# =========================
+
 def fetch_page(where: str, offset: int) -> Dict[str, Any]:
     params = {
         "where": where,
         "outFields": "*",
-        "outSR": 4326,
         "f": "json",
         "resultOffset": offset,
         "resultRecordCount": PAGE_SIZE,
-        "orderByFields": "ARR_DATE ASC, ARREST_NUM ASC, CHARGE_SEQ_NUM ASC",
     }
 
     response = requests.get(BASE_URL, params=params, timeout=60)
@@ -70,8 +87,8 @@ def fetch_page(where: str, offset: int) -> Dict[str, Any]:
     return data
 
 
-def fetch_all(where: str) -> List[Dict[str, Any]]:
-    all_records: List[Dict[str, Any]] = []
+def fetch_all(where: str, progress: bool = True) -> List[Dict[str, Any]]:
+    records = []
     offset = 0
 
     while True:
@@ -82,41 +99,48 @@ def fetch_all(where: str) -> List[Dict[str, Any]]:
             break
 
         for feature in features:
-            attrs = feature.get("attributes", {}).copy()
+            records.append(feature_to_record(feature))
 
-            if "ARR_DATE" in attrs:
-                attrs["ARR_DATE"] = epoch_ms_to_iso(attrs["ARR_DATE"])
-
-            all_records.append(attrs)
-
-        print(f"Fetched {len(all_records)} records so far...")
+        if progress:
+            print(f"Fetched {len(records)} total records...")
 
         if len(features) < PAGE_SIZE:
             break
 
         offset += PAGE_SIZE
 
-    return all_records
+    return records
 
 
-def sync_full_from_api(db_path: str) -> int:
-    """
-    Initial full sync: pull all available data.
-    """
-    records = fetch_all("1=1")
+# =========================
+# Sync Functions
+# =========================
+
+def empty_stats():
+    return {
+        "rows_processed": 0,
+        "inserted": 0,
+        "updated": 0,
+        "unchanged": 0,
+        "skipped": 0,
+        "final_row_count": 0,
+    }
+
+
+def sync_full_from_api(db_path: str):
+    records = fetch_all(where="1=1")
+
     if not records:
-        return 0
+        return empty_stats()
 
-    return upsert_records(db_path, records)
+    return upsert_records_with_stats(db_path, records)
 
 
-def sync_from_api(db_path: str, months_back: int = 6) -> int:
-    """
-    Incremental sync: pull recent records only.
-    """
-    where = build_recent_where_clause(months_back=months_back)
+def sync_from_api(db_path: str, months_back: int = 6):
+    where = build_recent_where_clause(months_back)
     records = fetch_all(where)
-    if not records:
-        return 0
 
-    return upsert_records(db_path, records)
+    if not records:
+        return empty_stats()
+
+    return upsert_records_with_stats(db_path, records)

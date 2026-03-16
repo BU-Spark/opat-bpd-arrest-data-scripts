@@ -23,20 +23,43 @@ def main():
     init_db(DB_PATH)
 
     if args.command == "import":
-        count = import_csv_to_db(DB_PATH, args.file)
-        print(f"Imported {count} rows.")
+        stats= import_csv_to_db(DB_PATH, args.file)
+        print(
+                f"Processed {stats['rows_read']} CSV rows. "
+                f"Inserted: {stats['inserted']}, "
+                f"Updated: {stats['updated']}, "
+                f"Unchanged: {stats['unchanged']}, "
+                f"Skipped: {stats['skipped']}. "
+                f"Final unique rows in DB: {stats['final_row_count']}."
+            )
 
     elif args.command == "export":
         count = export_db_to_csv(DB_PATH, args.file)
         print(f"Exported {count} rows.")
 
     elif args.command == "sync-full":
-        count = sync_full_from_api(DB_PATH)
-        print(f"Full sync complete. Processed {count} records.")
+        stats = sync_full_from_api(DB_PATH)
+        print(
+                f"Processed {stats['rows_processed']} API rows. "
+                f"Inserted: {stats['inserted']}, "
+                f"Updated: {stats['updated']}, "
+                f"Unchanged: {stats['unchanged']}, "
+                f"Skipped: {stats['skipped']}. "
+                f"Final unique rows in DB: {stats['final_row_count']}."
+            )
+        print(f"Full sync complete.")
 
     elif args.command == "sync":
-        count = sync_from_api(DB_PATH)
-        print(f"Synced {count} records from API.")
+        stats = sync_from_api(DB_PATH)
+        print(
+            f"Processed {stats['rows_processed']} API rows. "
+            f"Inserted: {stats['inserted']}, "
+            f"Updated: {stats['updated']}, "
+            f"Unchanged: {stats['unchanged']}, "
+            f"Skipped: {stats['skipped']}. "
+            f"Final unique rows in DB: {stats['final_row_count']}."
+        )
+        print(f"Synced {stats['rows_processed']} records from API.")
 
     # elif args.command == "test":
     #     from tests_runner import run_basic_tests

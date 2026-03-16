@@ -18,6 +18,7 @@ import csv
 import sqlite3
 from pathlib import Path
 from typing import Any, Dict, Iterable, Optional
+from datetime import datetime
 
 TABLE_NAME = "arrests"
 SYNC_STATE_TABLE = "sync_state"
@@ -171,6 +172,15 @@ def normalize_arrest_num(value: Any) -> Optional[str]:
 
 
 def normalize_record(record: Dict[str, Any]) -> Dict[str, Any]:
+    arr_date = normalize_arr_date(record.get("ARR_DATE"))
+
+    year_value = _clean_text(record.get("YEAR"))
+    if year_value is None and arr_date:
+        try:
+            year_value = str(datetime.fromisoformat(arr_date).year)
+        except ValueError:
+            pass
+
     return {
         "ARREST_NUM": normalize_arrest_num(record.get("ARREST_NUM")),
         "INC_NUM": _clean_text(record.get("INC_NUM")),
@@ -179,7 +189,7 @@ def normalize_record(record: Dict[str, Any]) -> Dict[str, Any]:
         "CHARGE_DESC": _clean_text(record.get("CHARGE_DESC")),
         "NIBRS_CODE": _clean_text(record.get("NIBRS_CODE")),
         "NIBRS_DESC": _clean_text(record.get("NIBRS_DESC")),
-        "ARR_DATE": _clean_text(record.get("ARR_DATE")),
+        "ARR_DATE": arr_date,
         "GENDER_DESC": _clean_text(record.get("GENDER_DESC")),
         "RACE_DESC": _clean_text(record.get("RACE_DESC")),
         "ETHNICITY_DESC": _clean_text(record.get("ETHNICITY_DESC")),
@@ -187,7 +197,7 @@ def normalize_record(record: Dict[str, Any]) -> Dict[str, Any]:
         "JUVENILE": _clean_text(record.get("JUVENILE")),
         "HOUR_OF_DAY": _clean_int(record.get("HOUR_OF_DAY")),
         "DAY_OF_WEEK": _clean_text(record.get("DAY_OF_WEEK")),
-        "YEAR": _clean_text(record.get("YEAR")),
+        "YEAR": year_value,
         "QUARTER": _clean_int(record.get("QUARTER")),
         "MONTH": _clean_int(record.get("MONTH")),
         "NEIGHBORHOOD": _clean_text(record.get("NEIGHBORHOOD")),
@@ -305,52 +315,254 @@ def upsert_records(db_path: str | Path, records: Iterable[Dict[str, Any]]) -> in
     finally:
         conn.close()
 
+def upsert_records_with_stats(
+    db_path: str | Path,
+    records: Iterable[Dict[str, Any]],
+) -> Dict[str, int]:
+    conn = get_conn(db_path)
+
+    stats = {
+        "rows_processed": 0,
+        "inserted": 0,
+        "updated": 0,
+        "unchanged": 0,
+        "skipped": 0,
+        "final_row_count": 0,
+    }
+
+    try:
+        for record in records:
+            stats["rows_processed"] += 1
+
+            try:
+                normalized_record = normalize_record(record)
+                validate_keys(normalized_record)
+            except Exception:
+                stats["skipped"] += 1
+                continue
+
+            existing = get_existing_record(
+                conn,
+                normalized_record["ARREST_NUM"],
+                normalized_record["CHARGE_SEQ_NUM"],
+            )
+
+            if existing is None:
+                upsert_record(conn, record)
+                stats["inserted"] += 1
+            else:
+                if records_equal(existing, normalized_record):
+                    stats["unchanged"] += 1
+                else:
+                    upsert_record(conn, record)
+                    stats["updated"] += 1
+
+        conn.commit()
+
+        stats["final_row_count"] = conn.execute(
+            f"SELECT COUNT(*) AS count FROM {TABLE_NAME}"
+        ).fetchone()["count"]
+
+        return stats
+
+    finally:
+        conn.close()
 
 # =========================
 # CSV Import / Export
 # =========================
+COLUMN_ALIASES = {
+    "ARREST_NUM": "ARREST_NUM",
+    "ARRESTNUMBER": "ARREST_NUM",
 
-def import_csv_to_db(db_path: str | Path, csv_path: str | Path) -> int:
+    "INC_NUM": "INC_NUM",
+
+    "CHARGE_SEQ_NUM": "CHARGE_SEQ_NUM",
+    "CHARGE_SEQUENCE_NUM": "CHARGE_SEQ_NUM",
+
+    "CHARGE_CODE": "CHARGE_CODE",
+    "CHARGE_CODE_NAME": "CHARGE_DESC",
+    "CHARGE_DESC": "CHARGE_DESC",
+
+    "NIBRS_CODE": "NIBRS_CODE",
+    "NIBRS_DESC": "NIBRS_DESC",
+
+    "ARREST_DATE": "ARR_DATE",
+    "ARR_DATE": "ARR_DATE",
+
+    "GENDER": "GENDER_DESC",
+    "GENDER_DESC": "GENDER_DESC",
+
+    "RACE": "RACE_DESC",
+    "RACE_DESC": "RACE_DESC",
+
+    "ETHNICITY_DESC": "ETHNICITY_DESC",
+
+    "AGE": "AGE",
+    "JUVENILE": "JUVENILE",
+    "HOUR_OF_DAY": "HOUR_OF_DAY",
+    "DAY_OF_WEEK": "DAY_OF_WEEK",
+    "YEAR": "YEAR",
+    "QUARTER": "QUARTER",
+    "MONTH": "MONTH",
+    "NEIGHBORHOOD": "NEIGHBORHOOD",
+    "DISTRICT": "DISTRICT",
+}
+
+def normalize_column_name(name: str) -> str:
+    cleaned = name.strip().upper()
+    cleaned = cleaned.replace(" ", "_").replace("-", "_")
+    return COLUMN_ALIASES.get(cleaned, cleaned)
+
+def normalize_arr_date(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+
+    text = str(value).strip()
+    if not text:
+        return None
+
+    # Handle CSV format like 11/1/2025 5:00
+    for fmt in ("%m/%d/%Y %H:%M", "%m/%d/%Y %H:%M:%S"):
+        try:
+            dt = datetime.strptime(text, fmt)
+            return dt.isoformat()
+        except ValueError:
+            pass
+
+    return text
+
+def normalize_csv_row(row: Dict[str, Any]) -> Dict[str, Any]:
+    normalized = {}
+    for key, value in row.items():
+        if key is None:
+            continue
+        normalized_key = normalize_column_name(key)
+        normalized[normalized_key] = value
+    return normalized
+
+def import_csv_to_db(db_path: str | Path, csv_path: str | Path) -> Dict[str, int]:
     csv_path = Path(csv_path)
     if not csv_path.exists():
         raise FileNotFoundError(csv_path)
 
     conn = get_conn(db_path)
-    count = 0
+
+    stats = {
+        "rows_read": 0,
+        "inserted": 0,
+        "updated": 0,
+        "unchanged": 0,
+        "skipped": 0,
+        "final_row_count": 0,
+    }
 
     try:
         with csv_path.open("r", encoding="utf-8-sig", newline="") as f:
             reader = csv.DictReader(f)
 
-            missing = [c for c in REQUIRED_KEY_COLUMNS if c not in reader.fieldnames]
+            if not reader.fieldnames:
+                raise ValueError("CSV file is missing a header row.")
+
+            normalized_headers = [normalize_column_name(h) for h in reader.fieldnames if h]
+            missing = [c for c in REQUIRED_KEY_COLUMNS if c not in normalized_headers]
             if missing:
-                raise ValueError(f"CSV missing required columns: {missing}")
+                raise ValueError(f"CSV missing required columns after normalization: {missing}")
 
             for row in reader:
-                upsert_record(conn, row)
-                count += 1
+                stats["rows_read"] += 1
+
+                try:
+                    normalized_row = normalize_csv_row(row)
+                    normalized_record = normalize_record(normalized_row)
+                    validate_keys(normalized_record)
+                except Exception:
+                    stats["skipped"] += 1
+                    continue
+
+                existing = get_existing_record(
+                    conn,
+                    normalized_record["ARREST_NUM"],
+                    normalized_record["CHARGE_SEQ_NUM"],
+                )
+
+                if existing is None:
+                    upsert_record(conn, normalized_row)
+                    stats["inserted"] += 1
+                else:
+                    if records_equal(existing, normalized_record):
+                        stats["unchanged"] += 1
+                    else:
+                        upsert_record(conn, normalized_row)
+                        stats["updated"] += 1
 
         conn.commit()
-        return count
+
+        stats["final_row_count"] = conn.execute(
+            f"SELECT COUNT(*) AS count FROM {TABLE_NAME}"
+        ).fetchone()["count"]
+
+        return stats
+
     finally:
         conn.close()
 
 
 def export_db_to_csv(db_path: str | Path, csv_path: str | Path) -> int:
-    conn = get_conn(db_path)
-    rows = conn.execute(
-        f"SELECT * FROM {TABLE_NAME} ORDER BY ARR_DATE"
-    ).fetchall()
-    conn.close()
-
     csv_path = Path(csv_path)
+
+    if csv_path.suffix == "":
+        csv_path = csv_path.with_suffix(".csv")
+
+    if csv_path.exists() and csv_path.is_dir():
+        raise IsADirectoryError(
+            f"Export path is a directory, not a file: {csv_path}"
+        )
+
+    conn = get_conn(db_path)
+    try:
+        rows = conn.execute(
+            f"""
+            SELECT
+                ARREST_NUM,
+                INC_NUM,
+                CHARGE_SEQ_NUM,
+                CHARGE_CODE,
+                CHARGE_DESC,
+                NIBRS_CODE,
+                NIBRS_DESC,
+                ARR_DATE,
+                GENDER_DESC,
+                RACE_DESC,
+                ETHNICITY_DESC,
+                AGE,
+                JUVENILE,
+                HOUR_OF_DAY,
+                DAY_OF_WEEK,
+                YEAR,
+                QUARTER,
+                MONTH,
+                NEIGHBORHOOD,
+                DISTRICT
+            FROM {TABLE_NAME}
+            ORDER BY ARR_DATE, ARREST_NUM, CHARGE_SEQ_NUM
+            """
+        ).fetchall()
+    finally:
+        conn.close()
+
     csv_path.parent.mkdir(parents=True, exist_ok=True)
 
     with csv_path.open("w", encoding="utf-8", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=EXPORT_COLUMNS)
         writer.writeheader()
+
         for row in rows:
-            writer.writerow({col: row[col] for col in EXPORT_COLUMNS})
+            row_dict = dict(row)
+            writer.writerow({
+                col: row_dict.get(col)
+                for col in EXPORT_COLUMNS
+            })
 
     return len(rows)
 
@@ -358,6 +570,31 @@ def export_db_to_csv(db_path: str | Path, csv_path: str | Path) -> int:
 # =========================
 # Utilities
 # =========================
+def count_duplicate_csv_keys(csv_path: str | Path):
+    csv_path = Path(csv_path)
+    seen = {}
+    duplicates = []
+
+    with csv_path.open("r", encoding="utf-8-sig", newline="") as f:
+        reader = csv.DictReader(f)
+
+        for row_num, row in enumerate(reader, start=2):
+            normalized_row = normalize_csv_row(row)
+            arrest_num = normalize_arrest_num(normalized_row.get("ARREST_NUM"))
+            charge_seq_num = str(normalized_row.get("CHARGE_SEQ_NUM")).strip() if normalized_row.get("CHARGE_SEQ_NUM") else None
+
+            key = (arrest_num, charge_seq_num)
+
+            if key in seen:
+                duplicates.append({
+                    "key": key,
+                    "first_row": seen[key],
+                    "duplicate_row": row_num,
+                })
+            else:
+                seen[key] = row_num
+
+    return duplicates
 
 def get_row_count(db_path: str | Path) -> int:
     conn = get_conn(db_path)
@@ -366,6 +603,80 @@ def get_row_count(db_path: str | Path) -> int:
     ).fetchone()
     conn.close()
     return row["count"]
+
+def record_exists(conn: sqlite3.Connection, arrest_num: str, charge_seq_num: str) -> bool:
+    row = conn.execute(
+        f"""
+        SELECT 1
+        FROM {TABLE_NAME}
+        WHERE ARREST_NUM = ? AND CHARGE_SEQ_NUM = ?
+        """,
+        (arrest_num, charge_seq_num),
+    ).fetchone()
+    return row is not None
+
+
+def get_existing_record(
+    conn: sqlite3.Connection,
+    arrest_num: str,
+    charge_seq_num: str,
+) -> Optional[Dict[str, Any]]:
+    row = conn.execute(
+        f"""
+        SELECT
+            ARREST_NUM,
+            INC_NUM,
+            CHARGE_SEQ_NUM,
+            CHARGE_CODE,
+            CHARGE_DESC,
+            NIBRS_CODE,
+            NIBRS_DESC,
+            ARR_DATE,
+            GENDER_DESC,
+            RACE_DESC,
+            ETHNICITY_DESC,
+            AGE,
+            JUVENILE,
+            HOUR_OF_DAY,
+            DAY_OF_WEEK,
+            YEAR,
+            QUARTER,
+            MONTH,
+            NEIGHBORHOOD,
+            DISTRICT
+        FROM {TABLE_NAME}
+        WHERE ARREST_NUM = ? AND CHARGE_SEQ_NUM = ?
+        """,
+        (arrest_num, charge_seq_num),
+    ).fetchone()
+
+    return dict(row) if row else None
+
+
+def records_equal(a: Dict[str, Any], b: Dict[str, Any]) -> bool:
+    compare_cols = [
+        "ARREST_NUM",
+        "INC_NUM",
+        "CHARGE_SEQ_NUM",
+        "CHARGE_CODE",
+        "CHARGE_DESC",
+        "NIBRS_CODE",
+        "NIBRS_DESC",
+        "ARR_DATE",
+        "GENDER_DESC",
+        "RACE_DESC",
+        "ETHNICITY_DESC",
+        "AGE",
+        "JUVENILE",
+        "HOUR_OF_DAY",
+        "DAY_OF_WEEK",
+        "YEAR",
+        "QUARTER",
+        "MONTH",
+        "NEIGHBORHOOD",
+        "DISTRICT",
+    ]
+    return all(a.get(col) == b.get(col) for col in compare_cols)
 
 
 def health_check(db_path: str | Path):
