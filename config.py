@@ -11,4 +11,4 @@ DB_PATH = DATA_DIR / "data.db"
 EXPORT_DIR = DATA_DIR / "exports"
 EXPORT_DIR.mkdir(parents=True, exist_ok=True)
 
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.1.0"

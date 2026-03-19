@@ -38,7 +38,7 @@ def main():
         print(f"Exported {count} rows.")
 
     elif args.command == "sync-full":
-        stats = sync_full_from_api(DB_PATH)
+        stats = sync_full_from_api(DB_PATH, progress=True)
         print(
                 f"Processed {stats['rows_processed']} API rows. "
                 f"Inserted: {stats['inserted']}, "
@@ -50,7 +50,7 @@ def main():
         print(f"Full sync complete.")
 
     elif args.command == "sync":
-        stats = sync_from_api(DB_PATH)
+        stats = sync_from_api(DB_PATH, progress=True)
         print(
             f"Processed {stats['rows_processed']} API rows. "
             f"Inserted: {stats['inserted']}, "

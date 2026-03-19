@@ -3,7 +3,7 @@ import threading
 import traceback
 import tkinter as tk
 from pathlib import Path
-from tkinter import filedialog, messagebox, scrolledtext
+from tkinter import filedialog, messagebox, scrolledtext, ttk
 
 from config import DB_PATH, EXPORT_DIR, APP_NAME, APP_VERSION
 from db import (
@@ -21,8 +21,8 @@ class App(tk.Tk):
         super().__init__()
 
         self.title(f"{APP_NAME} v{APP_VERSION}")
-        self.geometry("980x700")
-        self.minsize(820, 560)
+        self.geometry("980x760")
+        self.minsize(820, 600)
 
         init_db(DB_PATH)
 
@@ -36,6 +36,7 @@ class App(tk.Tk):
         self.row_count_var = tk.StringVar(value="Rows in DB: loading...")
         self.health_var = tk.StringVar(value="Health: checking...")
         self.status_var = tk.StringVar(value="Ready.")
+        self.progress_var = tk.StringVar(value="No sync running.")
 
         self._build_ui()
         self.refresh_status()
@@ -106,6 +107,20 @@ class App(tk.Tk):
 
         tk.Label(status_frame, textvariable=self.status_var, anchor="w", fg="blue").pack(fill="x")
 
+        progress_frame = tk.LabelFrame(outer, text="Sync Progress", padx=10, pady=10)
+        progress_frame.pack(fill="x", pady=(0, 10))
+
+        self.progress_bar = ttk.Progressbar(progress_frame, mode="indeterminate")
+        self.progress_bar.pack(fill="x", pady=(0, 6))
+
+        tk.Label(
+            progress_frame,
+            textvariable=self.progress_var,
+            anchor="w",
+            justify="left",
+            wraplength=920,
+        ).pack(fill="x")
+
         log_label = tk.Label(outer, text="Log Output", anchor="w", font=("Segoe UI", 11, "bold"))
         log_label.pack(fill="x", pady=(6, 4))
 
@@ -132,6 +147,11 @@ class App(tk.Tk):
         self.import_entry.config(state="disabled" if busy else "normal")
         self.export_entry.config(state="disabled" if busy else "normal")
 
+        if busy:
+            self.progress_bar.start(10)
+        else:
+            self.progress_bar.stop()
+
         self.status_var.set(status_text or ("Working..." if busy else "Ready."))
         self.update_idletasks()
 
@@ -141,6 +161,11 @@ class App(tk.Tk):
         self.log_box.see("end")
         self.log_box.config(state="disabled")
 
+    def log_progress(self, message: str):
+        self.progress_var.set(message)
+        self.log(message)
+        self.update_idletasks()
+
     def run_background(self, label: str, func, on_success=None):
         if self.busy:
             return
@@ -148,9 +173,11 @@ class App(tk.Tk):
         def worker():
             try:
                 self.after(0, lambda: self.set_busy(True, f"{label}..."))
+                self.after(0, lambda: self.progress_var.set(f"{label} started..."))
                 self.after(0, lambda: self.log(f"{label} started."))
                 result = func()
                 self.after(0, lambda: self.log(f"{label} completed."))
+                self.after(0, lambda: self.progress_var.set(f"{label} completed."))
                 self.after(0, lambda: self.set_busy(False, "Ready."))
                 self.after(0, self.refresh_status)
                 if on_success:
@@ -159,6 +186,7 @@ class App(tk.Tk):
                 tb = traceback.format_exc()
                 self.after(0, lambda: self.log(f"{label} failed: {e}"))
                 self.after(0, lambda: self.log(tb))
+                self.after(0, lambda: self.progress_var.set(f"{label} failed: {e}"))
                 self.after(0, lambda: self.set_busy(False, "Ready."))
                 self.after(0, lambda: messagebox.showerror("Error", str(e)))
 
@@ -241,8 +269,16 @@ class App(tk.Tk):
         self.run_background("CSV import", task, done)
 
     def on_sync_recent(self):
+        def progress_callback(message: str):
+            self.after(0, lambda: self.log_progress(message))
+
         def task():
-            return sync_from_api(DB_PATH, months_back=6)
+            return sync_from_api(
+                DB_PATH,
+                months_back=6,
+                progress=True,
+                progress_callback=progress_callback,
+            )
 
         def done(stats):
             self.log(
@@ -265,8 +301,15 @@ class App(tk.Tk):
         if not confirm:
             return
 
+        def progress_callback(message: str):
+            self.after(0, lambda: self.log_progress(message))
+
         def task():
-            return sync_full_from_api(DB_PATH)
+            return sync_full_from_api(
+                DB_PATH,
+                progress=True,
+                progress_callback=progress_callback,
+            )
 
         def done(stats):
             self.log(

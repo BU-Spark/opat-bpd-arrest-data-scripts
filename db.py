@@ -130,15 +130,17 @@ def _clean_int(value: Any) -> Optional[int]:
     
 def normalize_arrest_num(value: Any) -> Optional[str]:
     """
-    Normalize ARREST_NUM into a canonical format.
+    Normalize ARREST_NUM into a canonical numeric format.
 
-    Expected examples:
-    - '25-008332'   -> '20250008332'
-    - '20250008332' -> '20250008332'
+    Examples:
+    - '25-008332'    -> '20250008332'
+    - '20250008332'  -> '20250008332'
+    - '24-00541-11'  -> '20240054111'
 
-    Assumption:
-    - Short format is YY-NNNNNN
-    - Canonical format is YYYYNNNNNNN where YYYY = 20 + YY
+    Rules:
+    - YY-NNNNNN       -> YYYY + sequence padded to 7 digits
+    - YY-NNNNN-SS     -> YYYY + first part + suffix concatenated, padded to 7 digits total if needed
+    - 11-digit numeric -> kept as-is
     """
     if value is None:
         return None
@@ -147,28 +149,70 @@ def normalize_arrest_num(value: Any) -> Optional[str]:
     if not text:
         return None
 
-    # Remove whitespace
     text = text.replace(" ", "")
 
-    # Case 1: already full numeric format like 20250008332
+    # Case 1: already canonical 11-digit format
     if re.fullmatch(r"\d{11}", text):
         return text
 
-    # Case 2: short dashed format like 25-008332
+    # Case 2: YY-NNNNNN
     m = re.fullmatch(r"(\d{2})-(\d+)", text)
     if m:
         yy, seq = m.groups()
         year = f"20{yy}"
-        seq_padded = seq.zfill(7) 
+        seq_padded = seq.zfill(7)
         return f"{year}{seq_padded}"
 
-    # Fallback: strip non-digits, return if it looks usable
+    # Case 3: YY-NNNNN-SS -> concatenate second and third parts
+    m = re.fullmatch(r"(\d{2})-(\d+)-(\d+)", text)
+    if m:
+        yy, part1, part2 = m.groups()
+        year = f"20{yy}"
+        combined = f"{part1}{part2}"
+        combined_padded = combined.zfill(7)
+        return f"{year}{combined_padded}"
+
+    # Fallback: strip non-digits
     digits = re.sub(r"\D", "", text)
     if len(digits) == 11:
         return digits
 
-    # If it doesn't match known formats, keep cleaned original
     return text
+
+def normalize_race_desc(value: Any) -> str:
+    """
+    Canonical race categories:
+
+    - AMERICAN INDIAN OR ALASKA NATIVE
+    - ASIAN
+    - BLACK OR AFRICAN AMERICAN
+    - WHITE
+    - UNKNOWN
+    """
+    if value is None:
+        return "UNKNOWN"
+
+    text = str(value).strip().upper()
+
+    if not text:
+        return "UNKNOWN"
+
+    # Normalize spacing
+    text = re.sub(r"\s+", " ", text)
+
+    if "AMERICAN INDIAN" in text or "ALASKA" in text:
+        return "AMERICAN INDIAN OR ALASKA NATIVE"
+
+    if "ASIAN" in text:
+        return "ASIAN"
+
+    if "BLACK" in text or "AFRICAN AMERICAN" in text:
+        return "BLACK OR AFRICAN AMERICAN"
+
+    if "WHITE" in text:
+        return "WHITE"
+
+    return "UNKNOWN"
 
 
 def normalize_record(record: Dict[str, Any]) -> Dict[str, Any]:
@@ -191,8 +235,8 @@ def normalize_record(record: Dict[str, Any]) -> Dict[str, Any]:
         "NIBRS_DESC": _clean_text(record.get("NIBRS_DESC")),
         "ARR_DATE": arr_date,
         "GENDER_DESC": _clean_text(record.get("GENDER_DESC")),
-        "RACE_DESC": _clean_text(record.get("RACE_DESC")),
-        "ETHNICITY_DESC": _clean_text(record.get("ETHNICITY_DESC")),
+        "RACE_DESC": normalize_race_desc(record.get("RACE_DESC")),
+        "ETHNICITY_DESC": normalize_ethnicity_desc(record.get("ETHNICITY_DESC")),
         "AGE": _clean_int(record.get("AGE")),
         "JUVENILE": _clean_text(record.get("JUVENILE")),
         "HOUR_OF_DAY": _clean_int(record.get("HOUR_OF_DAY")),
@@ -408,6 +452,46 @@ COLUMN_ALIASES = {
     "NEIGHBORHOOD": "NEIGHBORHOOD",
     "DISTRICT": "DISTRICT",
 }
+
+def normalize_ethnicity_desc(value: Any) -> Optional[str]:
+    """
+    Normalize ETHNICITY_DESC into one canonical set:
+    - HISPANIC OR LATINX
+    - NOT HISPANIC OR LATINX
+    - UNKNOWN
+    """
+    if value is None:
+        return "UNKNOWN"
+
+    text = str(value).strip()
+    if not text:
+        return "UNKNOWN"
+
+    normalized = text.upper().strip()
+
+    # collapse repeated whitespace
+    normalized = re.sub(r"\s+", " ", normalized)
+
+    if normalized in {
+        "HISPANIC OR LATINX",
+        "HISPANIC ORIGIN",
+        "HISPANIC",
+        "LATINX",
+        "LATINO",
+        "LATINA",
+    }:
+        return "HISPANIC OR LATINX"
+
+    if normalized in {
+        "NOT HISPANIC OR LATINX",
+        "NOT OF HISPANIC ORIGIN",
+        "NON HISPANIC",
+        "NON-HISPANIC",
+        "NOT HISPANIC",
+    }:
+        return "NOT HISPANIC OR LATINX"
+    
+    return "UNKNOWN"
 
 def normalize_column_name(name: str) -> str:
     cleaned = name.strip().upper()
