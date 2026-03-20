@@ -128,6 +128,28 @@ def _clean_int(value: Any) -> Optional[int]:
     except (ValueError, TypeError):
         return None
     
+def build_arr_date_from_parts(
+    year_value: Any,
+    month_value: Any,
+    day_value: Any,
+    hour_value: Any,
+) -> Optional[str]:
+    year = _clean_int(year_value)
+    month = _clean_int(month_value)
+    day = _clean_int(day_value)
+    hour = _clean_int(hour_value)
+
+    if year is None or month is None or day is None:
+        return None
+
+    # default hour to 0 if missing
+    hour = hour if hour is not None else 0
+
+    try:
+        return datetime(year, month, day, hour).isoformat()
+    except ValueError:
+        return None
+    
 def normalize_arrest_num(value: Any) -> Optional[str]:
     """
     Normalize ARREST_NUM into a canonical numeric format.
@@ -218,6 +240,14 @@ def normalize_race_desc(value: Any) -> str:
 def normalize_record(record: Dict[str, Any]) -> Dict[str, Any]:
     arr_date = normalize_arr_date(record.get("ARR_DATE"))
 
+    if arr_date is None:
+        arr_date = build_arr_date_from_parts(
+            record.get("YEAR"),
+            record.get("MONTH"),
+            record.get("DAY"),
+            record.get("HOUR_OF_DAY"),  
+        )
+
     year_value = _clean_text(record.get("YEAR"))
     if year_value is None and arr_date:
         try:
@@ -244,7 +274,7 @@ def normalize_record(record: Dict[str, Any]) -> Dict[str, Any]:
         "YEAR": year_value,
         "QUARTER": _clean_int(record.get("QUARTER")),
         "MONTH": _clean_int(record.get("MONTH")),
-        "NEIGHBORHOOD": _clean_text(record.get("NEIGHBORHOOD")),
+        "NEIGHBORHOOD": normalize_neighborhood(record.get("NEIGHBORHOOD")),
         "DISTRICT": _clean_text(record.get("DISTRICT")),
     }
 
@@ -446,6 +476,7 @@ COLUMN_ALIASES = {
     "JUVENILE": "JUVENILE",
     "HOUR_OF_DAY": "HOUR_OF_DAY",
     "DAY_OF_WEEK": "DAY_OF_WEEK",
+    "DAY": "DAY",  
     "YEAR": "YEAR",
     "QUARTER": "QUARTER",
     "MONTH": "MONTH",
@@ -515,6 +546,74 @@ def normalize_arr_date(value: Any) -> Optional[str]:
             pass
 
     return text
+
+def normalize_neighborhood(value: Any) -> Optional[str]:
+    """
+    Normalize NEIGHBORHOOD into a canonical set.
+
+    Boston neighborhoods are standardized to title case.
+    Non-Boston municipality values are also standardized to title case.
+    Junk / unknown values become UNKNOWN.
+    """
+    if value is None:
+        return "UNKNOWN"
+
+    text = str(value).strip()
+    if not text:
+        return "UNKNOWN"
+
+    normalized = re.sub(r"\s+", " ", text.upper().strip())
+
+    mapping = {
+    # Boston neighborhoods
+    "DORCHESTER": "Dorchester",
+    "DORTCHESTER": "Dorchester",
+    "ROXBURY": "Roxbury",
+    "DOWNTOWN": "Downtown",
+    "SOUTH BOSTON": "South Boston",
+    "MATTAPAN": "Mattapan",
+    "SOUTH END": "South End",
+    "EAST BOSTON": "East Boston",
+    "BACK BAY": "Back Bay",
+    "JAMAICA PLAIN": "Jamaica Plain",
+    "HYDE PARK": "Hyde Park",
+    "WEST END": "West End",
+    "CHARLESTOWN": "Charlestown",
+    "FENWAY": "Fenway",
+    "BOSTON": "Downtown",
+    "CITY OF BOSTON": "Downtown",
+    "BEACON HILL": "Beacon Hill",
+    "ROSLINDALE": "Roslindale",
+    "WEST ROXBURY": "West Roxbury",
+    "BRIGHTON": "Brighton",
+    "CHINATOWN": "Chinatown",
+    "ALLSTON": "Allston",
+    "MISSION HILL": "Mission Hill",
+    "NORTH END": "North End",
+    "SOUTH BOSTON WATERFRONT": "South Boston Waterfront",
+    "LEATHER DISTRICT": "Leather District",
+    "LONGWOOD": "Longwood",
+    "BAY VILLAGE": "Bay Village",
+
+    # Outside Boston (cleaned)
+    "WELLESLEY": "Wellesley",
+    "STAMFORD": "Stamford",
+    "BROCKTON": "Brockton",
+    "MALDEN": "Malden",
+    "WEYMOUTH TOWN": "Weymouth",
+    "BRAINTREE TOWN": "Braintree",
+    "LYNN": "Lynn",
+    "MILTON": "Milton",
+    "RANDOLPH": "Town",
+    "RANDOLPH TOWN": "Town",
+    "SAUGUS": "Saugus",
+    "WALTHAM": "Waltham",
+}
+
+    if normalized in {"11", "UNKNOWN", "UNK", "N/A", "NA", "NONE", "NULL"}:
+        return "UNKNOWN"
+
+    return mapping.get(normalized, text.strip().title())
 
 def normalize_csv_row(row: Dict[str, Any]) -> Dict[str, Any]:
     normalized = {}
